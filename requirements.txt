@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+httpx
+python-multipart
+chromadb
+sentence-transformers
+langchain-text-splitters
+faster-whisper
+kokoro
+soundfile
+numpy
+pypdf
+python-dotenv

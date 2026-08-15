@@ -1,0 +1,6 @@
+Alice Smith
+Python Software Developer
+Experience:
+- Developed backend API systems using FastAPI, PostgreSQL, and Redis.
+- Configured and deployed applications using Docker containers.
+Skills: Python, FastAPI, SQL, Docker

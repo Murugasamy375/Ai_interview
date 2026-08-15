@@ -1,0 +1,5 @@
+Backend Developer Job Description
+We are looking for a Python Backend Developer.
+Requirements:
+- Experience with Python and web frameworks, preferably FastAPI.
+- Familiarity with SQL and Docker.
