@@ -1,19 +1,14 @@
-"""
-Voice API routes.
-
-POST /voice/transcribe
-    browser audio -> faster-whisper -> transcript
-
-POST /voice/tts
-    question text -> Kokoro -> WAV audio
-"""
-
 import logging
-from typing import Optional
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import (
+    APIRouter,
+    File,
+    Form,
+    HTTPException,
+    UploadFile
+)
 from fastapi.responses import Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from app.services.speech_to_text import transcribe_audio
 from app.services.text_to_speech import generate_speech
@@ -22,79 +17,130 @@ logger = logging.getLogger("app.routes.voice")
 
 router = APIRouter(
     prefix="/voice",
-    tags=["Voice Interview"],
+    tags=["Voice"]
 )
 
 
+# -----------------------------
+# TTS Request
+# -----------------------------
+
 class TTSRequest(BaseModel):
-    text: str = Field(..., min_length=1, max_length=4000)
-    voice: Optional[str] = None
-    speed: float = Field(default=1.0, ge=0.5, le=2.0)
+    text: str
+    voice: str = "af_heart"
+    speed: float = 1.0
 
 
-@router.post("/transcribe")
-async def transcribe_endpoint(
-    audio: UploadFile = File(...),
-    language: str = Form(default="en"),
-):
-    """Convert candidate microphone audio to text."""
-
-    try:
-        audio_bytes = await audio.read()
-
-        if not audio_bytes:
-            raise HTTPException(
-                status_code=400,
-                detail="Uploaded audio is empty.",
-            )
-
-        transcript = await transcribe_audio(
-            audio_bytes=audio_bytes,
-            filename=audio.filename or "candidate.webm",
-            language=language,
-        )
-
-        return {
-            "success": True,
-            "text": transcript,
-        }
-
-    except HTTPException:
-        raise
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        logger.exception("Local STT failed")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Speech-to-text failed: {exc}",
-        )
-
+# -----------------------------
+# TEXT → SPEECH
+# -----------------------------
 
 @router.post("/tts")
-async def tts_endpoint(payload: TTSRequest):
-    """Convert AI interview question text into WAV audio."""
+async def tts_endpoint(request: TTSRequest):
 
     try:
-        audio_bytes = await generate_speech(
-            text=payload.text,
-            voice=payload.voice,
-            speed=payload.speed,
+
+        if not request.text.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="Text cannot be empty"
+            )
+
+        logger.info(
+            "TTS request received: %s",
+            request.text[:100]
+        )
+
+        # IMPORTANT:
+        # generate_speech() is synchronous.
+        # DO NOT use await here.
+        audio_bytes = generate_speech(
+            text=request.text,
+            voice=request.voice,
+            speed=request.speed
+        )
+
+        logger.info(
+            "TTS generated successfully: %d bytes",
+            len(audio_bytes)
         )
 
         return Response(
             content=audio_bytes,
             media_type="audio/wav",
             headers={
-                "Cache-Control": "no-store",
-            },
+                "Content-Disposition":
+                    "inline; filename=ai_response.wav"
+            }
         )
 
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        logger.exception("Local TTS failed")
+    except HTTPException:
+        raise
+
+    except Exception as e:
+
+        logger.exception(
+            "TTS failed"
+        )
+
         raise HTTPException(
             status_code=500,
-            detail=f"Text-to-speech failed: {exc}",
+            detail=str(e)
+        )
+
+
+# -----------------------------
+# SPEECH → TEXT
+# -----------------------------
+
+@router.post("/transcribe")
+async def transcribe_endpoint(
+    file: UploadFile = File(...),
+    language: str = Form(default="en")
+):
+
+    try:
+
+        if not file.filename:
+            raise HTTPException(
+                status_code=400,
+                detail="Audio filename is missing"
+            )
+
+        audio_bytes = await file.read()
+
+        if not audio_bytes:
+            raise HTTPException(
+                status_code=400,
+                detail="Audio file is empty"
+            )
+
+        logger.info(
+            "Transcribing audio: %s",
+            file.filename
+        )
+
+        text = await transcribe_audio(
+            audio_bytes=audio_bytes,
+            filename=file.filename,
+            language=language
+        )
+
+        return {
+            "success": True,
+            "text": text
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+
+        logger.exception(
+            "Transcription failed"
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
         )

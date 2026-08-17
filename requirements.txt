@@ -2,12 +2,24 @@ fastapi
 uvicorn
 httpx
 python-multipart
+python-dotenv
+pypdf
+
 chromadb
-sentence-transformers
 langchain-text-splitters
+
+# CPU-only PyTorch
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.3.1+cpu
+
+sentence-transformers
+
+# Speech-to-text
 faster-whisper
+
+# Text-to-speech
 kokoro
 soundfile
+
 numpy
-pypdf
-python-dotenv
+scikit-learn

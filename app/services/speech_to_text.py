@@ -1,125 +1,138 @@
-"""
-Local Speech-to-Text service using faster-whisper.
-
-Audio flow:
-Browser microphone -> FastAPI -> faster-whisper -> plain text
-
-No OpenAI API is used here.
-"""
-
 import logging
 import os
 import tempfile
 from pathlib import Path
-from typing import Optional
 
 from faster_whisper import WhisperModel
 
-logger = logging.getLogger("app.services.speech_to_text")
+logger = logging.getLogger(
+    "app.services.speech_to_text"
+)
 
-_MODEL: Optional[WhisperModel] = None
+# Lazy-loaded Whisper model
+_model = None
 
 
-def _get_model() -> WhisperModel:
-    """Lazy-load the Whisper model so FastAPI can start without loading it immediately."""
-    global _MODEL
+def get_whisper_model():
+    """
+    Load Whisper only when transcription is requested.
+    """
 
-    if _MODEL is not None:
-        return _MODEL
+    global _model
 
-    model_size = os.getenv("WHISPER_MODEL", "base")
-    device = os.getenv("WHISPER_DEVICE", "cpu")
-    compute_type = os.getenv(
-        "WHISPER_COMPUTE_TYPE",
-        "int8" if device == "cpu" else "float16",
-    )
+    if _model is None:
 
-    logger.info(
-        "Loading faster-whisper model=%s device=%s compute_type=%s",
-        model_size,
-        device,
-        compute_type,
-    )
+        model_name = os.getenv(
+            "WHISPER_MODEL",
+            "tiny"
+        )
 
-    _MODEL = WhisperModel(
-        model_size,
-        device=device,
-        compute_type=compute_type,
-    )
+        device = os.getenv(
+            "WHISPER_DEVICE",
+            "cpu"
+        )
 
-    logger.info("faster-whisper model loaded successfully.")
-    return _MODEL
+        compute_type = os.getenv(
+            "WHISPER_COMPUTE_TYPE",
+            "int8"
+        )
+
+        logger.info(
+            "Loading Whisper model=%s device=%s compute=%s",
+            model_name,
+            device,
+            compute_type
+        )
+
+        _model = WhisperModel(
+            model_name,
+            device=device,
+            compute_type=compute_type,
+            cpu_threads=2,
+            num_workers=1
+        )
+
+        logger.info(
+            "Whisper loaded successfully"
+        )
+
+    return _model
 
 
 async def transcribe_audio(
     audio_bytes: bytes,
-    filename: str = "candidate.webm",
-    language: str = "en",
+    filename: str = "audio.webm",
+    language: str = "en"
 ) -> str:
-    """Transcribe browser-recorded audio into text."""
+    """
+    Convert recorded audio into text.
+
+    The function is async because the route can await it,
+    but the Whisper inference itself is synchronous.
+    """
 
     if not audio_bytes:
-        raise ValueError("Uploaded audio is empty.")
+        raise ValueError(
+            "Audio data is empty"
+        )
 
-    suffix = Path(filename).suffix.lower() or ".webm"
+    suffix = Path(filename).suffix or ".webm"
 
-    # faster-whisper accepts a path-like audio source. MediaRecorder webm
-    # is written temporarily and removed after transcription.
     temp_path = None
 
     try:
+
         with tempfile.NamedTemporaryFile(
             suffix=suffix,
-            delete=False,
-        ) as temp_file:
-            temp_file.write(audio_bytes)
-            temp_path = temp_file.name
+            delete=False
+        ) as temp:
 
-        model = _get_model()
+            temp.write(audio_bytes)
+            temp.flush()
 
-        kwargs = {
-            "beam_size": 5,
-            "vad_filter": True,
-            "condition_on_previous_text": False,
-        }
+            temp_path = temp.name
 
-        if language:
-            kwargs["language"] = language
+        model = get_whisper_model()
 
-        logger.info(
-            "Transcribing %s (%d bytes)",
-            filename,
-            len(audio_bytes),
+        segments, info = model.transcribe(
+            temp_path,
+            language=language,
+            beam_size=1,
+            best_of=1,
+            temperature=0
         )
 
-        segments, info = model.transcribe(temp_path, **kwargs)
+        text_parts = []
 
-        # `segments` is lazy; iterating it actually performs inference.
-        transcript_parts = [
-            segment.text.strip()
-            for segment in segments
-            if segment.text and segment.text.strip()
-        ]
+        for segment in segments:
 
-        transcript = " ".join(transcript_parts).strip()
+            segment_text = segment.text.strip()
 
-        if not transcript:
-            raise RuntimeError(
-                "No speech was detected. Please speak clearly and try again."
-            )
+            if segment_text:
+                text_parts.append(
+                    segment_text
+                )
+
+        text = " ".join(text_parts).strip()
 
         logger.info(
-            "STT complete. language=%s probability=%.3f chars=%d",
-            getattr(info, "language", "unknown"),
-            getattr(info, "language_probability", 0.0),
-            len(transcript),
+            "Transcription completed: %d characters",
+            len(text)
         )
 
-        return transcript
+        return text
+
+    except Exception:
+        logger.exception(
+            "Speech-to-text failed"
+        )
+        raise
 
     finally:
+
         if temp_path:
+
             try:
-                Path(temp_path).unlink(missing_ok=True)
-            except Exception:
-                logger.warning("Could not remove temporary audio file: %s", temp_path)
+                os.remove(temp_path)
+            except OSError:
+                pass

@@ -1,16 +1,6 @@
-"""
-Local Text-to-Speech service using Kokoro-82M.
-
-Text flow:
-AI question text -> Kokoro -> WAV bytes -> browser
-
-No OpenAI API is used here.
-"""
-
 import io
 import logging
 import os
-from typing import Optional
 
 import numpy as np
 import soundfile as sf
@@ -18,111 +8,113 @@ from kokoro import KPipeline
 
 logger = logging.getLogger("app.services.text_to_speech")
 
-_PIPELINE: Optional[KPipeline] = None
+# Lazy-loaded model
+_pipeline = None
 
 
-def _get_pipeline() -> KPipeline:
-    """Lazy-load Kokoro so the server does not synthesize during import."""
-    global _PIPELINE
+def get_kokoro_pipeline():
+    """
+    Load Kokoro only when TTS is actually requested.
+    This reduces startup RAM usage.
+    """
+    global _pipeline
 
-    if _PIPELINE is not None:
-        return _PIPELINE
+    if _pipeline is None:
+        lang_code = os.getenv("KOKORO_LANG", "a")
 
-    # 'a' is the American English pipeline used by Kokoro's examples.
-    lang_code = os.getenv("KOKORO_LANG", "a")
+        logger.info("Loading Kokoro TTS pipeline...")
 
-    logger.info("Loading Kokoro TTS pipeline lang_code=%s", lang_code)
+        _pipeline = KPipeline(
+            lang_code=lang_code
+        )
 
-    _PIPELINE = KPipeline(lang_code=lang_code)
+        logger.info("Kokoro loaded successfully")
 
-    logger.info("Kokoro TTS pipeline loaded successfully.")
-    return _PIPELINE
-
-
-def _normalise_voice(voice: Optional[str]) -> str:
-    """Pick a Kokoro voice."""
-    return voice or os.getenv("KOKORO_VOICE", "af_heart")
+    return _pipeline
 
 
-async def generate_speech(
+def generate_speech(
     text: str,
-    voice: Optional[str] = None,
-    speed: float = 1.0,
+    voice: str | None = None,
+    speed: float = 1.0
 ) -> bytes:
     """
-    Generate WAV audio bytes from text.
+    Convert text to WAV audio using Kokoro.
 
-    Kokoro's standard sample rate is 24 kHz.
+    IMPORTANT:
+    This is a synchronous function.
+    Do NOT use await generate_speech().
     """
 
-    text = (text or "").strip()
+    if not text or not text.strip():
+        raise ValueError("Text cannot be empty")
 
-    if not text:
-        raise ValueError("TTS text cannot be empty.")
+    pipeline = get_kokoro_pipeline()
 
-    # Keep individual browser requests reasonably small.
-    if len(text) > 4000:
-        text = text[:3997] + "..."
-
-    try:
-        speed = float(speed)
-    except (TypeError, ValueError):
-        speed = 1.0
-
-    speed = max(0.5, min(2.0, speed))
-    selected_voice = _normalise_voice(voice)
-
-    pipeline = _get_pipeline()
+    selected_voice = voice or os.getenv(
+        "KOKORO_VOICE",
+        "af_heart"
+    )
 
     logger.info(
-        "Generating Kokoro speech: voice=%s speed=%.2f chars=%d",
-        selected_voice,
-        speed,
-        len(text),
+        "Generating speech using voice=%s",
+        selected_voice
     )
 
-    audio_parts = []
+    audio_chunks = []
 
-    # Kokoro may yield multiple chunks for longer text.
-    generator = pipeline(
-        text,
-        voice=selected_voice,
-        speed=speed,
-    )
+    try:
+        generator = pipeline(
+            text.strip(),
+            voice=selected_voice,
+            speed=float(speed)
+        )
 
-    for _, _, audio in generator:
-        if audio is None:
-            continue
+        for _, _, audio in generator:
 
-        # Torch tensors -> numpy.
-        if hasattr(audio, "detach"):
-            audio = audio.detach().cpu().numpy()
-        else:
+            if audio is None:
+                continue
+
+            # Kokoro may return a PyTorch tensor
+            if hasattr(audio, "detach"):
+                audio = (
+                    audio
+                    .detach()
+                    .cpu()
+                    .numpy()
+                )
+
             audio = np.asarray(audio)
 
-        audio_parts.append(audio.astype(np.float32))
+            if audio.size > 0:
+                audio_chunks.append(audio)
 
-    if not audio_parts:
-        raise RuntimeError("Kokoro returned no audio.")
+    except Exception:
+        logger.exception("Kokoro speech generation failed")
+        raise
 
-    audio = np.concatenate(audio_parts)
+    if not audio_chunks:
+        raise RuntimeError(
+            "Kokoro produced no audio"
+        )
+
+    audio = np.concatenate(audio_chunks)
 
     output = io.BytesIO()
 
-    # WAV is universally playable by modern browsers and avoids MP3 encoders.
+    # Kokoro uses 24 kHz audio
     sf.write(
         output,
         audio,
         24000,
-        format="WAV",
-        subtype="PCM_16",
+        format="WAV"
     )
 
     audio_bytes = output.getvalue()
 
-    if not audio_bytes:
-        raise RuntimeError("Kokoro generated empty audio.")
-
-    logger.info("Kokoro TTS complete: %d bytes", len(audio_bytes))
+    logger.info(
+        "Generated TTS audio: %d bytes",
+        len(audio_bytes)
+    )
 
     return audio_bytes
